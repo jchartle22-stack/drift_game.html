@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>3D Drift Simulator</title>
+    <!--
+      This single file includes:
+      1. Three.js (3D Rendering)
+      2. Cannon-es.js (Physics Engine)
+      3. Tone.js (Audio Engine)
+      4. All game logic, styling, and HTML.
+    -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon-es/0.18.0/cannon-es.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.7.77/Tone.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: 'Arial', sans-serif;
+            background-color: #222;
+            color: white;
+        }
+        #container {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            text-align: center;
+            z-index: 10;
+        }
+        #score, #drift-points {
+            font-size: 2rem;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+        }
+        #drift-points {
+            font-size: 1.5rem;
+            color: #00ffff;
+            min-height: 1.5rem;
+        }
+        #controls {
+            position: absolute;
+            bottom: 20px;
+            left: 0;
+            width: 100%;
+            z-index: 10;
+            display: none; /* Hidden by default, shown for touch devices */
+            user-select: none;
+        }
+        .control-group {
+            position: absolute;
+            bottom: 0;
+            display: flex;
+        }
+        #steering-controls {
+            left: 20px;
+        }
+        #pedal-controls {
+            right: 20px;
+            flex-direction: column-reverse; /* Gas on top */
+        }
+        #handbrake-control {
+            left: 50%;
+            transform: translateX(-50%);
+        }
+        .control-button {
+            width: 80px;
+            height: 80px;
+            background: rgba(255, 255, 255, 0.2);
+            border: 2px solid rgba(255, 255, 255, 0.4);
+            border-radius: 50%;
+            margin: 10px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: white;
+            padding: 0;
+        }
+        #handbrake {
+            width: 100px;
+            height: 60px;
+            border-radius: 10px;
+        }
+        #gas {
+            background: rgba(46, 204, 113, 0.4);
+        }
+        #brake {
+            background: rgba(231, 76, 60, 0.4);
+        }
+        #message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 1.5rem;
+            background: rgba(0,0,0,0.7);
+            padding: 20px;
+            border-radius: 10px;
+            z-index: 20;
+            display: none; /* Shown on start */
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    
+    <div id="ui">
+        <div id="score">Score: 0</div>
+        <div id="drift-points"></div>
+    </div>
+
+    <div id="message">
+        Tap or Press any key to start sound<br>
+        [W,A,S,D] or On-Screen Buttons to Drive<br>
+        [Space] or [H] for Handbrake
+    </div>
+
+    <!-- On-screen controls for mobile -->
+    <div id="controls">
+        <div id="steering-controls" class="control-group">
+            <button id="steer-left" class="control-button">L</button>
+            <button id="steer-right" class="control-button">R</button>
+        </div>
+        <div id="handbrake-control" class="control-group">
+             <button id="handbrake" class="control-button">Drift</button>
+        </div>
+        <div id="pedal-controls" class="control-group">
+            <button id="gas" class="control-button">Gas</button>
+            <button id="brake" class="control-button">Brake</button>
+        </div>
+    </div>
+
+    <script type="module">
+        let scene, camera, renderer, clock;
+        let world, carBody;
+        let carMesh;
+        let totalScore = 0, currentDriftPoints = 0;
+        let isDrifting = false;
+
+        // Physics parameters
+        const carWidth = 1.8;
+        const carHeight = 1.2;
+        const carLength = 4.0;
+        const carMass = 1200; // kg
+        
+        const engineForce = 8000;
+        const brakeForce = 4000;
+        const steeringTorque = 120; // How fast the car turns
+        const defaultLateralFriction = 50; // High friction = good grip
+        const handbrakeLateralFriction = 5; // Low friction = slide
+        const maxSteerAngle = 0.5; // Radians
+        const maxSpeed = 80; // m/s
+
+        // Input state
+        const inputState = {
+            forward: false,
+            backward: false,
+            left: false,
+            right: false,
+            handbrake: false
+        };
+
+        // Audio
+        let engineSound, tireSqueal;
+        let audioInitialized = false;
+
+        const scoreElement = document.getElementById('score');
+        const driftPointsElement = document.getElementById('drift-points');
+        const messageElement = document.getElementById('message');
+
+        function init() {
+            // --- Basic Setup ---
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x333333);
+            clock = new THREE.Clock();
+
+            // --- Camera ---
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 8, 12);
+            camera.lookAt(0, 0, 0);
+
+            // --- Renderer ---
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.getElementById('container').appendChild(renderer.domElement);
+
+            // --- Lighting ---
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(50, 50, 50);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            scene.add(directionalLight);
+            
+            // --- Initialize Physics World ---
+            initPhysics();
+            
+            // --- Create Ground ---
+            createGround();
+            
+            // --- Create Car ---
+            createCar();
+
+            // --- Setup UI and Message ---
+            messageElement.style.display = 'block';
+
+            // --- Event Listeners ---
+            window.addEventListener('resize', onWindowResize, false);
+            initControls();
+            
+            // --- Start Animation Loop ---
+            animate();
+        }
+        
+        function initPhysics() {
+            world = new CANNON.World();
+            world.gravity.set(0, -9.82, 0); // m/s²
+            world.broadphase = new CANNON.SAPBroadphase(world);
+            world.solver.iterations = 10;
+        }
+
+        function createGround() {
+            // Physics
+            const groundShape = new CANNON.Plane();
+            const groundBody = new CANNON.Body({ mass: 0 }); // mass 0 = static
+            groundBody.addShape(groundShape);
+            groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2); // Rotate to be flat
+            world.addBody(groundBody);
+            
+            // Visual
+            const groundGeometry = new THREE.PlaneGeometry(500, 500);
+            const groundMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x555555, 
+                side: THREE.DoubleSide
+            });
+            const groundMesh = new THREE.Mesh(groundGeometry, groundMaterial);
+            groundMesh.rotation.x = -Math.PI / 2;
+            groundMesh.receiveShadow = true;
+            scene.add(groundMesh);
+            
+            // Add some "drift blocks"
+            addObstacle(new THREE.Vector3(20, 1.5, 10), new THREE.Vector3(5, 3, 5));
+            addObstacle(new THREE.Vector3(-15, 2.5, -15), new THREE.Vector3(8, 5, 4));
+            addObstacle(new THREE.Vector3(10, 0.5, -25), new THREE.Vector3(20, 1, 2));
+        }
+        
+        function addObstacle(position, size) {
+            const halfExtents = new CANNON.Vec3(size.x * 0.5, size.y * 0.5, size.z * 0.5);
+            // Physics
+            const boxShape = new CANNON.Box(halfExtents);
+            const boxBody = new CANNON.Body({ mass: 0 });
+            boxBody.addShape(boxShape);
+            boxBody.position.set(position.x, position.y, position.z);
+            world.addBody(boxBody);
+            
+            // Visual
+            const boxGeometry = new THREE.BoxGeometry(size.x, size.y, size.z);
+            const boxMaterial = new THREE.MeshStandardMaterial({ color: 0x999999 });
+            const boxMesh = new THREE.Mesh(boxGeometry, boxMaterial);
+            boxMesh.position.set(position.x, position.y, position.z);
+            boxMesh.castShadow = true;
+            boxMesh.receiveShadow = true;
+            scene.add(boxMesh);
+        }
+
+        function createCar() {
+            // Physics
+            const chassisShape = new CANNON.Box(new CANNON.Vec3(carLength * 0.5, carHeight * 0.5, carWidth * 0.5));
+            carBody = new CANNON.Body({ mass: carMass });
+            carBody.addShape(chassisShape);
+            carBody.position.set(0, 2, 0);
+            carBody.angularDamping = 0.5; // Helps stabilize
+            world.addBody(carBody);
+            
+            // Visual
+            const carGeometry = new THREE.BoxGeometry(carLength, carHeight, carWidth);
+            const carMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0xff0000, // Red
+                metalness: 0.5,
+                roughness: 0.5
+            });
+            carMesh = new THREE.Mesh(carGeometry, carMaterial);
+            carMesh.castShadow = true;
+            scene.add(carMesh);
+
+            // Add simple "headlights"
+            const headLightGeo = new THREE.BoxGeometry(0.2, 0.2, 0.1);
+            const headLightMat = new THREE.MeshBasicMaterial({ color: 0xffffee, emissive: 0xffffee });
+            
+            const light1 = new THREE.Mesh(headLightGeo, headLightMat);
+            light1.position.set(carLength * 0.5, 0.2, carWidth * 0.5 - 0.3); // Front-right
+            carMesh.add(light1);
+            
+            const light2 = new THREE.Mesh(headLightGeo, headLightMat);
+            light2.position.set(carLength * 0.5, 0.2, -carWidth * 0.5 + 0.3); // Front-left
+            carMesh.add(light2);
+        }
+
+        function initAudio() {
+            if (audioInitialized) return;
+            try {
+                Tone.start();
+                
+                // Engine sound
+                engineSound = new Tone.Oscillator({
+                    type: "sawtooth4",
+                    frequency: 100,
+                    volume: -20
+                }).toDestination();
+                
+                const filter = new Tone.Filter(800, "lowpass").toDestination();
+                const distortion = new Tone.Distortion(0.4).connect(filter);
+                engineSound.connect(distortion);
+                engineSound.start();
+
+                // Tire squeal sound
+                tireSqueal = new Tone.NoiseSynth({
+                    noise: { type: "white" },
+                    envelope: { attack: 0.01, decay: 0.1, sustain: 0.3, release: 0.2 },
+                    volume: -20
+                }).toDestination();
+                
+                audioInitialized = true;
+                messageElement.style.display = 'none';
+            } catch (e) {
+                console.error("Audio could not be initialized:", e);
+                messageElement.innerHTML = "Audio failed to start. Please refresh.";
+            }
+        }
+        
+        function initControls() {
+            // Keyboard
+            window.addEventListener('keydown', (e) => {
+                if (!audioInitialized) initAudio();
+                
+                switch(e.key.toLowerCase()) {
+                    case 'w': case 'arrowup': inputState.forward = true; break;
+                    case 's': case 'arrowdown': inputState.backward = true; break;
+                    case 'a': case 'arrowleft': inputState.left = true; break;
+                    case 'd': case 'arrowright': inputState.right = true; break;
+                    case ' ': case 'h': inputState.handbrake = true; break;
+                }
+            });
+            
+            window.addEventListener('keyup', (e) => {
+                switch(e.key.toLowerCase()) {
+                    case 'w': case 'arrowup': inputState.forward = false; break;
+                    case 's': case 'arrowdown': inputState.backward = false; break;
+                    case 'a': case 'arrowleft': inputState.left = false; break;
+                    case 'd': case 'arrowright': inputState.right = false; break;
+                    case ' ': case 'h': inputState.handbrake = false; break;
+                }
+            });
+
+            // Mobile Touch Controls
+            if ('ontouchstart' in window) {
+                document.getElementById('controls').style.display = 'block';
+                
+                const controls = {
+                    'steer-left': 'left',
+                    'steer-right': 'right',
+                    'gas': 'forward',
+                    'brake': 'backward',
+                    'handbrake': 'handbrake'
+                };
+
+                for (const [id, stateKey] of Object.entries(controls)) {
+                    const el = document.getElementById(id);
+                    el.addEventListener('touchstart', (e) => {
+                        e.preventDefault();
+                        if (!audioInitialized) initAudio();
+                        inputState[stateKey] = true;
+                        el.style.background = 'rgba(255, 255, 255, 0.5)';
+                    }, { passive: false });
+                    
+                    el.addEventListener('touchend', (e) => {
+                        e.preventDefault();
+                        inputState[stateKey] = false;
+                        // Reset to original color
+                        if (id === 'gas') el.style.background = 'rgba(46, 204, 113, 0.4)';
+                        else if (id === 'brake') el.style.background = 'rgba(231, 76, 60, 0.4)';
+                        else el.style.background = 'rgba(255, 255, 255, 0.2)';
+                    }, { passive: false });
+                }
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const deltaTime = clock.getDelta();
+            
+            // Update physics
+            if (carBody) {
+                updateCarPhysics(deltaTime);
+                world.step(1/60, deltaTime, 3);
+                
+                // Sync visual with physics
+                carMesh.position.copy(carBody.position);
+                carMesh.quaternion.copy(carBody.quaternion);
+
+                updateCamera();
+                updateAudio();
+                updateDriftScore();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function updateCarPhysics(deltaTime) {
+            const carSpeed = carBody.velocity.length();
+            
+            // --- 1. Get Local Vectors ---
+            // Get the car's forward and right vectors
+            const forwardVector = new CANNON.Vec3(1, 0, 0); // Local X+ is forward for our mesh
+            carBody.quaternion.vmult(forwardVector, forwardVector);
+            
+            const rightVector = new CANNON.Vec3(0, 0, 1); // Local Z+ is right
+            carBody.quaternion.vmult(rightVector, rightVector);
+
+            // --- 2. Steering ---
+            // Apply torque to turn the car
+            let steerAmount = 0;
+            if (inputState.left) steerAmount = steeringTorque;
+            if (inputState.right) steerAmount = -steeringTorque;
+            
+            // Reduce steering at higher speeds
+            const steeringFactor = 1 - (carSpeed / maxSpeed) * 0.5;
+            const turnTorque = steerAmount * steeringFactor;
+            carBody.torque.y = turnTorque; // Apply torque around local Y (up)
+            
+            // --- 3. Engine & Braking ---
+            // Apply force in the car's forward direction
+            let force = 0;
+            if (inputState.forward && carSpeed < maxSpeed) {
+                force = engineForce;
+            }
+            if (inputState.backward) {
+                force = -brakeForce;
+            }
+            carBody.applyForce(forwardVector.scale(force), carBody.position);
+            
+            // --- 4. Drift & Friction (The "Simulation" part) ---
+            // This is the key: We manually apply friction to stop sideways sliding.
+            // When handbrake is on, we apply MUCH LESS friction, allowing the car to slide.
+            
+            // Get sideways velocity
+            const sidewaysVelocity = carBody.velocity.dot(rightVector);
+            
+            // Set friction coefficient
+            const lateralFriction = inputState.handbrake ? handbrakeLateralFriction : defaultLateralFriction;
+            
+            // Calculate and apply counter-force to stop sliding
+            const frictionForce = -sidewaysVelocity * lateralFriction * carMass * deltaTime;
+            
+            // Apply this friction force along the car's right/left axis
+            carBody.applyForce(rightVector.scale(frictionForce), carBody.position);
+
+            // --- 5. Air Drag & Rolling Resistance (simplified) ---
+            // Apply a simple drag force opposing velocity
+            const dragForce = carBody.velocity.clone().negate();
+            dragForce.scale(0.5); // Small drag coefficient
+            carBody.applyForce(dragForce, carBody.position);
+        }
+
+        function updateCamera() {
+            // Simple follow cam
+            const offset = new THREE.Vector3(12, 8, 0); // Behind and above
+            offset.applyQuaternion(carMesh.quaternion);
+            
+            const targetPosition = carMesh.position.clone().add(offset);
+            camera.position.lerp(targetPosition, 0.1); // Smoothly follow
+            camera.lookAt(carMesh.position);
+        }
+        
+        function updateAudio() {
+            if (!audioInitialized) return;
+            
+            const carSpeed = carBody.velocity.length();
+            const carSpeedNormalized = Math.min(carSpeed / maxSpeed, 1.0);
+            
+            // Update engine sound
+            let rpm = 100 + carSpeedNormalized * 150;
+            if (inputState.forward) {
+                rpm += 50 * (1.0 - carSpeedNormalized); // Add "revving" sound
+            }
+            engineSound.frequency.rampTo(rpm, 0.1);
+            
+            let volume = -20 + (carSpeedNormalized * 10);
+            if(inputState.forward) volume += 5;
+            engineSound.volume.rampTo(volume, 0.1);
+
+            // Update tire squeal
+            const driftAngle = getDriftAngle();
+            if (isDrifting && driftAngle > 15 && carSpeed > 10) {
+                let squealVolume = -20 + (driftAngle / 90) * 15 + (carSpeed / maxSpeed) * 10;
+                tireSqueal.volume.rampTo(squealVolume, 0.05);
+                if (tireSqueal.state !== "started") {
+                    tireSqueal.triggerAttack();
+                }
+            } else {
+                if (tireSqueal.state === "started") {
+                    tireSqueal.triggerRelease();
+                }
+            }
+        }
+
+        function getDriftAngle() {
+            const carSpeed = carBody.velocity.length();
+            if (carSpeed < 5) return 0; // Not moving, no drift
+
+            const velocityVector = carBody.velocity.clone().normalize();
+            
+            const forwardVector = new CANNON.Vec3(1, 0, 0); // Local X+
+            carBody.quaternion.vmult(forwardVector, forwardVector);
+            forwardVector.normalize();
+            
+            // Angle between where the car is GOING (velocity) and where it's POINTING (forward)
+            // Use dot product. acos(v1.dot(v2))
+            const dot = velocityVector.dot(forwardVector);
+            // Clamp dot to [-1, 1] to avoid Math.acos errors
+            const clampedDot = Math.max(-1, Math.min(1, dot));
+            const angleRad = Math.acos(clampedDot);
+            
+            return angleRad * (180 / Math.PI); // Convert to degrees
+        }
+
+        function updateDriftScore() {
+            const carSpeed = carBody.velocity.length();
+            const driftAngle = getDriftAngle();
+            
+            const minDriftSpeed = 10; // m/s
+            const minDriftAngle = 15; // degrees
+
+            if (carSpeed > minDriftSpeed && driftAngle > minDriftAngle) {
+                // We are drifting!
+                isDrifting = true;
+                const pointsThisFrame = Math.round(carSpeed * (driftAngle / 10));
+                currentDriftPoints += pointsThisFrame;
+                
+                driftPointsElement.innerText = `+${currentDriftPoints.toLocaleString()}`;
+                
+            } else if (isDrifting) {
+                // Drift just ended
+                isDrifting = false;
+                totalScore += currentDriftPoints;
+                scoreElement.innerText = `Score: ${totalScore.toLocaleString()}`;
+                driftPointsElement.innerText = '';
+                currentDriftPoints = 0;
+            }
+            
+            // Reset for spin-out
+            if (driftAngle > 80) {
+                driftPointsElement.innerText = 'SPIN!';
+                currentDriftPoints = 0;
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>
+
